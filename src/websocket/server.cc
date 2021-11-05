@@ -160,106 +160,122 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
-class frame_content {
-public:
-    static constexpr uint8_t FIN = 1 << 7;
-    static constexpr uint8_t RSV1 = 1 << 6; 
-    static constexpr uint8_t RSV2 = 1 << 5; 
-    static constexpr uint8_t RSV3 = 1 << 4;
-    static constexpr uint8_t OPCODE = 0b1111;
-    static constexpr uint8_t CONTINUE = 0x0;
-    static constexpr uint8_t TEXT = 0x1;
-    static constexpr uint8_t BINARY = 0x2;
-    static constexpr uint8_t CLOSE = 0x8;
-    static constexpr uint8_t PING = 0x9;
-    static constexpr uint8_t PONG = 0xA;
-    static constexpr uint8_t MASK = 1<<7;
+struct frame_header {
+    static constexpr uint8_t FIN = 7;
+    static constexpr uint8_t RSV1 = 6; 
+    static constexpr uint8_t RSV2 = 5; 
+    static constexpr uint8_t RSV3 = 4;
+    static constexpr uint8_t MASKED = 7;
 
-    uint8_t get_opcode() const {
-        return this->flags & this->OPCODE;
+    uint8_t fin : 1;
+    uint8_t rsv1 : 1;
+    uint8_t rsv2 : 1;
+    uint8_t rsv3 : 1;
+    uint8_t opcode : 4;
+    uint8_t masked : 1;
+    uint8_t length : 7;
+    frame_header(char const *input) {
+        this->fin = (input[0] >> FIN) & 1;
+        this->rsv1 = (input[0] >> RSV1) & 1;
+        this->rsv2 = (input[0] >> RSV2) & 1;
+        this->rsv3 = (input[0] >> RSV3) & 1;
+        this->opcode = input[0] & 0b1111;
+        this->masked = (input[1] >> MASKED) & 1;
+        this->length = (input[1] & 0b1111111);
     }
-
-    bool is_fin() const {
-        return this->flags & this->FIN;
-    }
-
-    bool is_rsv1() const {
-        return this->flags & this->RSV1;
-    }
-
-    bool is_rsv2() const {
-        return this->flags & this->RSV2;
-    }
-
-    bool is_rsv3() const {
-        return this->flags & this->RSV3;
-    }
-    // etc.
-
-    void print() {
-        wlogger.info("Fin {}", is_fin());
-        wlogger.info("RSV1 {}", is_rsv1());
-        wlogger.info("RSV2 {}", is_rsv2());
-        wlogger.info("RSV3 {}", is_rsv3());
-        wlogger.info("Opcode {}", get_opcode());
-        wlogger.info("Masked {}", masked);
-        wlogger.info("Length {}", payload_length);
-        wlogger.info("Masking Key {}", masking_key);
-        for (int8_t c : masked_payload)
-            std::cout << c;
-        std::cout << "\n";
-        wlogger.info("Payload {}", payload);
-    }
-
-    void set_payload_from_bytes(const char* start) {
-        payload.reserve(payload_length);
-        uint32_t j = 0;
-        for (int64_t i = 0; i < (int64_t)payload_length; i++) {
-            masked_payload.push_back(start[i]);
-            payload.push_back(start[i] ^ (static_cast<char>(((masking_key << (j * 8)) >> 24))));
-            j = (j + 1) % 4;
+    // Returns length of the rest of the header.
+    uint64_t get_rest_of_header_length() {
+        size_t next_read_length = sizeof(uint32_t); // Masking key
+        if (length == 126) {
+            next_read_length += sizeof(uint16_t);
+        } else if (length == 127) {
+            next_read_length += sizeof(uint64_t);
         }
+        return next_read_length;
     }
+    void debug() {
+        wlogger.info("Header: {} {} {} {} {} {} {}", get_fin(), get_rsv1(), 
+                get_rsv2(), get_rsv3(), get_opcode(), 
+                get_masked(), get_length());
+    }
+    uint8_t get_fin() {return fin;}
+    uint8_t get_rsv1() {return rsv1;}
+    uint8_t get_rsv2() {return rsv2;}
+    uint8_t get_rsv3() {return rsv3;}
+    uint8_t get_opcode() {return opcode;}
+    uint8_t get_masked() {return masked;}
+    uint8_t get_length() {return length;}
 
-    uint8_t flags{};
-    bool masked{};
-    uint64_t payload_length{};
-    uint32_t masking_key{};
-    std::vector<char> masked_payload{};
-    std::string payload{};
+    bool is_opcode_known() {
+        //https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
+        return opcode < 0xA && !(opcode < 0x8 && opcode > 0x2);
+    }
 };
 
-frame_content parse_frame(seastar::sstring input) {
-    frame_content frame;
-    std::cout << input << "\n";
-    frame.flags = input[0];
-    frame.masked = input[1] & frame.MASK;
-    frame.payload_length = (static_cast<uint8_t>(input[1]) | frame.MASK) ^ frame.MASK;
-    uint8_t offset = 2;
-    if (frame.payload_length == 126) {
-        frame.payload_length = ntohs(*(input.c_str() + 2));
-        offset = 4;
-    } else if (frame.payload_length == 127) {
-        frame.payload_length = be64toh(*(input.c_str() + 2));
-        offset = 10;
-    }
-    if (frame.masked) {
-        frame.masking_key = ntohl(*(input.c_str() + offset));
-        offset += 4;
-    }
-    frame.set_payload_from_bytes(input.c_str() + offset);
-
-    return frame;
-}
-
+class frame_content {
+    frame_header header;
+    temporary_buffer<char> payload;
+public:
+    frame_content(frame_header header, temporary_buffer<char> payload) : header(header), payload(std::move(payload)) {}
+};
 
 future<> connection::read_one() {
-    return _read_buf.read().then([this] (temporary_buffer<char> buf) {
-        if (buf.empty()) {
-            _done = true;
+    return _read_buf.read_exactly(2).then([this] (temporary_buffer<char> headBuf) {
+        if (headBuf.size() < 2) { //FIXME: Magic numbers
+            this->_done = true;
+            throw websocket::exception("Connection closed.");
+        } else {
+            frame_header header {headBuf.get()};
+            // https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
+            // We must close the connection if data isn't masked.
+            if (!header.masked) {
+                throw websocket::exception("RSVX is not 0.");
+            }
+            // RSVX must be 0
+            if (header.rsv1 | header.rsv2 | header.rsv3) {
+                throw websocket::exception("Frame not masked.");
+            }
+            // Opcode must be known.
+            if (!header.is_opcode_known()) {
+                throw websocket::exception("Unknown opcode.");
+            } 
+            header.debug();
+            return seastar::make_ready_future<frame_header>(header);
         }
-        //FIXME: implement
-        parse_frame(buf.get()).print();
+    }).then([this](frame_header header) { 
+        return _read_buf.read_exactly(header.get_rest_of_header_length()).then(
+                [this, header = std::move(header)](temporary_buffer<char> buf) mutable {
+            if (buf.size() < header.get_rest_of_header_length()) {
+                this->_done = true;
+                throw websocket::exception("Connection closed.");
+            } else {
+                uint64_t payload_length = header.length;
+                uint32_t masking_key;
+                size_t offset = 0;
+                char const *input = buf.get();
+                if (header.length == 126) {
+                    payload_length = be16toh(*(uint16_t const *)(input + offset));
+                    offset += sizeof(uint16_t);
+                } else if (header.length == 127) {
+                    payload_length = be64toh(*(uint64_t const *)(input + offset));
+                    offset += sizeof(uint64_t);
+                }
+                masking_key = be32toh(*(uint32_t const *)(input + offset));
+                temporary_buffer<char> data = _read_buf.read_exactly(payload_length).get();
+                if (data.size() < payload_length) {
+                    this->_done = true;
+                    throw websocket::exception("Connection closed.");
+                } else {
+                    temporary_buffer<char> _payload = data.clone();
+                    char *payload = _payload.get_write();
+                    for (uint64_t i = 0, j = 0; i < payload_length; ++i, j = (j + 1) % 4) {
+                        payload[i] ^= static_cast<char>(((masking_key << (j * 8)) >> 24));
+                    }
+                    return write_to_pipe(std::move(_payload));
+                }
+            }        
+            return seastar::make_ready_future<>();
+        });
     });
 }
 
@@ -270,7 +286,7 @@ future<> connection::read_loop() {
         });
     }).then_wrapped([this] (future<> f) {
         if (f.failed()) {
-            wlogger.error("Read failed: {}", f.get_exception());
+            wlogger.error("Failure: {}", f.get_exception());
         }
         return _replies.push_eventually({});
     }).finally([this] {
@@ -279,14 +295,22 @@ future<> connection::read_loop() {
 }
 
 future<> connection::response_loop() {
-    // FIXME: implement
-    return make_ready_future<>();
+    return do_until([this] {return _done;}, [this] {
+        return input().read().then([this](temporary_buffer<char> buf) {
+            // FIXME: implement
+            wlogger.info("Loop: {} {}", buf.get(), buf.size());
+            return _write_buf.write(std::move(buf));
+        });
+    });
 }
 
 void connection::shutdown() {
     wlogger.debug("Shutting down");
     _fd.shutdown_input();
     _fd.shutdown_output();
+}
+future<> connection::write_to_pipe(temporary_buffer<char>&& buf) {
+    return _writer->write(std::move(buf));
 }
 
 }
