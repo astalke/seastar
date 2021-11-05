@@ -160,13 +160,106 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
+class frame_content {
+public:
+    static constexpr uint8_t FIN = 1 << 7;
+    static constexpr uint8_t RSV1 = 1 << 6; 
+    static constexpr uint8_t RSV2 = 1 << 5; 
+    static constexpr uint8_t RSV3 = 1 << 4;
+    static constexpr uint8_t OPCODE = 0b1111;
+    static constexpr uint8_t CONTINUE = 0x0;
+    static constexpr uint8_t TEXT = 0x1;
+    static constexpr uint8_t BINARY = 0x2;
+    static constexpr uint8_t CLOSE = 0x8;
+    static constexpr uint8_t PING = 0x9;
+    static constexpr uint8_t PONG = 0xA;
+    static constexpr uint8_t MASK = 1<<7;
+
+    uint8_t get_opcode() const {
+        return this->flags & this->OPCODE;
+    }
+
+    bool is_fin() const {
+        return this->flags & this->FIN;
+    }
+
+    bool is_rsv1() const {
+        return this->flags & this->RSV1;
+    }
+
+    bool is_rsv2() const {
+        return this->flags & this->RSV2;
+    }
+
+    bool is_rsv3() const {
+        return this->flags & this->RSV3;
+    }
+    // etc.
+
+    void print() {
+        wlogger.info("Fin {}", is_fin());
+        wlogger.info("RSV1 {}", is_rsv1());
+        wlogger.info("RSV2 {}", is_rsv2());
+        wlogger.info("RSV3 {}", is_rsv3());
+        wlogger.info("Opcode {}", get_opcode());
+        wlogger.info("Masked {}", masked);
+        wlogger.info("Length {}", payload_length);
+        wlogger.info("Masking Key {}", masking_key);
+        for (int8_t c : masked_payload)
+            std::cout << c;
+        std::cout << "\n";
+        wlogger.info("Payload {}", payload);
+    }
+
+    void set_payload_from_bytes(const char* start) {
+        payload.reserve(payload_length);
+        uint32_t j = 0;
+        for (int64_t i = 0; i < (int64_t)payload_length; i++) {
+            masked_payload.push_back(start[i]);
+            payload.push_back(start[i] ^ (static_cast<char>(((masking_key << (j * 8)) >> 24))));
+            j = (j + 1) % 4;
+        }
+    }
+
+    uint8_t flags{};
+    bool masked{};
+    uint64_t payload_length{};
+    uint32_t masking_key{};
+    std::vector<char> masked_payload{};
+    std::string payload{};
+};
+
+frame_content parse_frame(seastar::sstring input) {
+    frame_content frame;
+    std::cout << input << "\n";
+    frame.flags = input[0];
+    frame.masked = input[1] & frame.MASK;
+    frame.payload_length = (static_cast<uint8_t>(input[1]) | frame.MASK) ^ frame.MASK;
+    uint8_t offset = 2;
+    if (frame.payload_length == 126) {
+        frame.payload_length = ntohs(*(input.c_str() + 2));
+        offset = 4;
+    } else if (frame.payload_length == 127) {
+        frame.payload_length = be64toh(*(input.c_str() + 2));
+        offset = 10;
+    }
+    if (frame.masked) {
+        frame.masking_key = ntohl(*(input.c_str() + offset));
+        offset += 4;
+    }
+    frame.set_payload_from_bytes(input.c_str() + offset);
+
+    return frame;
+}
+
+
 future<> connection::read_one() {
     return _read_buf.read().then([this] (temporary_buffer<char> buf) {
         if (buf.empty()) {
             _done = true;
         }
         //FIXME: implement
-        wlogger.info("Received: {}", buf.get());
+        parse_frame(buf.get()).print();
     });
 }
 
