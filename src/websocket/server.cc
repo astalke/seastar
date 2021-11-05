@@ -229,7 +229,7 @@ public:
     std::string payload{};
 };
 
-FrameContent parseFrame(seastar::sstring input) {
+FrameContent parseFrame(const char *input) {
     FrameContent frame;
     std::cout << input << "\n";
     frame.flags = input[0];
@@ -237,17 +237,17 @@ FrameContent parseFrame(seastar::sstring input) {
     frame.payloadLength = (static_cast<uint8_t>(input[1]) | frame.MASK) ^ frame.MASK;
     uint8_t offset = 2;
     if (frame.payloadLength == 126) {
-        frame.payloadLength = ntohs(*(input.c_str() + 2));
+        frame.payloadLength = be16toh(*(uint16_t const *)(input + offset));
         offset = 4;
     } else if (frame.payloadLength == 127) {
-        frame.payloadLength = be64toh(*(input.c_str() + 2));
+        frame.payloadLength = be64toh(*(uint64_t const *)(input + offset));
         offset = 10;
     }
     if (frame.masked) {
-        frame.maskingKey = ntohl(*(input.c_str() + offset));
+        frame.maskingKey = be32toh(*(uint32_t const *)(input + offset));
         offset += 4;
     }
-    frame.setPayloadFromBytes(input.c_str() + offset);
+    frame.setPayloadFromBytes(input + offset);
 
     return frame;
 }
