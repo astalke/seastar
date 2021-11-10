@@ -160,106 +160,75 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
-class FrameContent {
-public:
-    static constexpr uint8_t FIN = 1 << 7;
-    static constexpr uint8_t RSV1 = 1 << 6; 
-    static constexpr uint8_t RSV2 = 1 << 5; 
-    static constexpr uint8_t RSV3 = 1 << 4;
-    static constexpr uint8_t OPCODE = 0b1111;
-    static constexpr uint8_t CONTINUE = 0x0;
-    static constexpr uint8_t TEXT = 0x1;
-    static constexpr uint8_t BINARY = 0x2;
-    static constexpr uint8_t CLOSE = 0x8;
-    static constexpr uint8_t PING = 0x9;
-    static constexpr uint8_t PONG = 0xA;
-    static constexpr uint8_t MASK = 1<<7;
+struct frameHeader {
+    static constexpr uint8_t FIN = 7;
+    static constexpr uint8_t RSV1 = 6; 
+    static constexpr uint8_t RSV2 = 5; 
+    static constexpr uint8_t RSV3 = 4;
+    static constexpr uint8_t MASKED = 7;
 
-    uint8_t getOpcode() const {
-        return this->flags & this->OPCODE;
+    uint8_t fin : 1;
+    uint8_t rsv1 : 1;
+    uint8_t rsv2 : 1;
+    uint8_t rsv3 : 1;
+    uint8_t opcode : 4;
+    uint8_t masked : 1;
+    uint8_t length : 7;
+    frameHeader(char const *input) {
+        this->fin = (input[0] >> FIN) & 1;
+        this->rsv1 = (input[0] >> RSV1) & 1;
+        this->rsv2 = (input[0] >> RSV2) & 1;
+        this->rsv3 = (input[0] >> RSV3) & 1;
+        this->opcode = input[0] & 0b1111;
+        this->masked = (input[1] >> MASKED) & 1;
+        this->length = (input[1] & 0b1111111);
     }
-
-    bool isFin() {
-        return this->flags & this->FIN;
-    }
-
-    bool isRSV1() {
-        return this->flags & this->RSV1;
-    }
-
-    bool isRSV2() {
-        return this->flags & this->RSV2;
-    }
-
-    bool isRSV3() {
-        return this->flags & this->RSV3;
-    }
-    // etc.
-
-    void print() {
-        wlogger.info("Fin {}", isFin());
-        wlogger.info("RSV1 {}", isRSV1());
-        wlogger.info("RSV2 {}", isRSV2());
-        wlogger.info("RSV3 {}", isRSV3());
-        wlogger.info("Opcode {}", getOpcode());
-        wlogger.info("Masked {}", masked);
-        wlogger.info("Length {}", payloadLength);
-        wlogger.info("Masking Key {}", maskingKey);
-        for (int8_t c : maksekPayload)
-            std::cout << c;
-        std::cout << "\n";
-        wlogger.info("Payload {}", payload);
-    }
-
-    void setPayloadFromBytes(const char* start) {
-        payload.reserve(payloadLength);
-        uint32_t j = 0;
-        for (int64_t i = 0; i < (int64_t)payloadLength; i++) {
-            maksekPayload.push_back(start[i]);
-            payload.push_back(start[i] ^ (static_cast<char>(((maskingKey << (j * 8)) >> 24))));
-            j = (j + 1) % 4;
-        }
-    }
-
-    uint8_t flags{};
-    bool masked{};
-    uint64_t payloadLength{};
-    uint32_t maskingKey{};
-    std::vector<char> maksekPayload{};
-    std::string payload{};
 };
 
-FrameContent parseFrame(const char *input) {
-    FrameContent frame;
-    std::cout << input << "\n";
-    frame.flags = input[0];
-    frame.masked = input[1] & frame.MASK;
-    frame.payloadLength = (static_cast<uint8_t>(input[1]) | frame.MASK) ^ frame.MASK;
-    uint8_t offset = 2;
-    if (frame.payloadLength == 126) {
-        frame.payloadLength = be16toh(*(uint16_t const *)(input + offset));
-        offset = 4;
-    } else if (frame.payloadLength == 127) {
-        frame.payloadLength = be64toh(*(uint64_t const *)(input + offset));
-        offset = 10;
-    }
-    if (frame.masked) {
-        frame.maskingKey = be32toh(*(uint32_t const *)(input + offset));
-        offset += 4;
-    }
-    frame.setPayloadFromBytes(input + offset);
-
-    return frame;
-}
-
-
 future<> connection::read_one() {
-    return _read_buf.read().then([this] (temporary_buffer<char> buf) {
-        if (buf.empty()) {
+    return _read_buf.read_exactly(2).then(
+            [this] (temporary_buffer<char> headBuf) {
+        if (headBuf.empty()) {
             _done = true;
+        } else {
+            frameHeader header {headBuf.get()};
+            size_t nextReadLength = sizeof(uint32_t); // Masking key
+
+            if (header.length == 126) {
+                nextReadLength += sizeof(uint16_t);
+            } else if (header.length == 127) {
+                nextReadLength += sizeof(uint64_t);
+            }
+
+            // We must process only masked frames.
+            if (header.masked) {
+                return _read_buf.read_exactly(nextReadLength).then(
+                        [this, nextReadLength, header = std::move(header)](temporary_buffer<char> buf) {
+                    uint64_t payloadLength = header.length;
+                    uint32_t maskingKey;
+                    size_t offset = 0;
+                    char const *input = buf.get();
+                    if (header.length == 126) {
+                        payloadLength = be16toh(*(uint16_t const *)(input + offset));
+                        offset += sizeof(uint16_t);
+                    } else if (header.length == 127) {
+                        be64toh(*(uint64_t const *)(input + offset));
+                        offset += sizeof(uint64_t);
+                    }
+                    maskingKey = be32toh(*(uint32_t const *)(input + offset));
+                    return _read_buf.read_exactly(payloadLength).then(
+                            [this, payloadLength, maskingKey](temporary_buffer<char> data) {
+                        std::string payload{data.get()};
+                        for (uint64_t i = 0, j = 0; i < payloadLength; ++i, j = (j + 1) % 4) {
+                            payload[i] ^= static_cast<char>(((maskingKey << (j * 8)) >> 24));
+                        }
+                        wlogger.info("Payload: {}", payload);
+                    });
+                });
+            }
+            //FIXME: implement
         }
-        //FIXME: implement
-        parseFrame(buf.get()).print();
+        return seastar::make_ready_future<>();
     });
 }
 
