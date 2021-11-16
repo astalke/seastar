@@ -21,6 +21,9 @@
 
 #pragma once
 
+#include <map>
+#include <functional>
+
 #include <seastar/http/request_parser.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sstring.hh>
@@ -144,6 +147,7 @@ class server {
     std::vector<server_socket> _listeners;
     gate _task_gate;
     boost::intrusive::list<connection> _connections;
+    std::map<std::string, std::function<future<>(temporary_buffer<char>&&, output_stream<char>&)>> handlers;
 public:
     /*!
      * \brief listen for a WebSocket connection on given address
@@ -161,6 +165,10 @@ public:
      * Stops the server and shuts down all active connections
      */
     future<> stop();
+
+    bool is_handler_registered(std::string &name);
+
+    void register_handler(std::string &&name, std::function<future<>(temporary_buffer<char>&&, output_stream<char>&)> _handler);
 
     friend class connection;
 protected:
