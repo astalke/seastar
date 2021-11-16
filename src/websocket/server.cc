@@ -299,7 +299,7 @@ future<> connection::response_loop() {
         return input().read().then([this](temporary_buffer<char> buf) {
             // FIXME: implement
             wlogger.info("Loop: {} {}", buf.get(), buf.size());
-            return _write_buf.write(std::move(buf));
+            return this->_server.handlers["echo"](std::move(buf), _write_buf);
         });
     });
 }
@@ -309,8 +309,18 @@ void connection::shutdown() {
     _fd.shutdown_input();
     _fd.shutdown_output();
 }
+
 future<> connection::write_to_pipe(temporary_buffer<char>&& buf) {
     return _writer->write(std::move(buf));
 }
+
+bool server::is_handler_registered(std::string &name) {
+    return handlers.find(name) != handlers.end();
+}
+
+void server::register_handler(std::string &&name, std::function<future<>(temporary_buffer<char>&&, output_stream<char>&)> _handler) {
+    handlers[name] = _handler;
+}
+
 
 }
