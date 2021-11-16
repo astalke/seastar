@@ -160,7 +160,7 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
-struct frameHeader {
+struct FrameHeader {
     static constexpr uint8_t FIN = 7;
     static constexpr uint8_t RSV1 = 6; 
     static constexpr uint8_t RSV2 = 5; 
@@ -174,7 +174,7 @@ struct frameHeader {
     uint8_t opcode : 4;
     uint8_t masked : 1;
     uint8_t length : 7;
-    frameHeader(char const *input) {
+    FrameHeader(char const *input) {
         this->fin = (input[0] >> FIN) & 1;
         this->rsv1 = (input[0] >> RSV1) & 1;
         this->rsv2 = (input[0] >> RSV2) & 1;
@@ -183,52 +183,99 @@ struct frameHeader {
         this->masked = (input[1] >> MASKED) & 1;
         this->length = (input[1] & 0b1111111);
     }
+    // Returns length of the rest of the header.
+    uint64_t getRestOfHeaderLength() {
+        size_t nextReadLength = sizeof(uint32_t); // Masking key
+        if (length == 126) {
+            nextReadLength += sizeof(uint16_t);
+        } else if (length == 127) {
+            nextReadLength += sizeof(uint64_t);
+        }
+        return nextReadLength;
+    }
+    void debug() {
+        wlogger.info("Header: {} {} {} {} {} {} {}", get_fin(), get_rsv1(), 
+                get_rsv2(), get_rsv3(), get_opcode(), 
+                get_masked(), get_length());
+    }
+    uint8_t get_fin() {return fin;}
+    uint8_t get_rsv1() {return rsv1;}
+    uint8_t get_rsv2() {return rsv2;}
+    uint8_t get_rsv3() {return rsv3;}
+    uint8_t get_opcode() {return opcode;}
+    uint8_t get_masked() {return masked;}
+    uint8_t get_length() {return length;}
+
+    bool isOpcodeKnown() {
+        //https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
+        return opcode < 0xA && !(opcode < 0x8 && opcode > 0x2);
+    }
+};
+
+class FrameContent {
+    FrameHeader header;
+    temporary_buffer<char> payload;
+public:
+    FrameContent(FrameHeader header, temporary_buffer<char> payload) : header(header), payload(std::move(payload)) {}
 };
 
 future<> connection::read_one() {
-    return _read_buf.read_exactly(2).then(
-            [this] (temporary_buffer<char> headBuf) {
-        if (headBuf.empty()) {
-            _done = true;
+    return _read_buf.read_exactly(2).then([this] (temporary_buffer<char> headBuf) {
+        if (headBuf.size() < 2) { //FIXME: Magic numbers
+            this->_done = true;
+            throw websocket::exception("Connection closed.");
         } else {
-            frameHeader header {headBuf.get()};
-            size_t nextReadLength = sizeof(uint32_t); // Masking key
-
-            if (header.length == 126) {
-                nextReadLength += sizeof(uint16_t);
-            } else if (header.length == 127) {
-                nextReadLength += sizeof(uint64_t);
+            FrameHeader header {headBuf.get()};
+            // https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
+            // We must close the connection if data isn't masked.
+            if (!header.masked) {
+                throw websocket::exception("RSVX is not 0.");
             }
-
-            // We must process only masked frames.
-            if (header.masked) {
-                return _read_buf.read_exactly(nextReadLength).then(
-                        [this, nextReadLength, header = std::move(header)](temporary_buffer<char> buf) {
-                    uint64_t payloadLength = header.length;
-                    uint32_t maskingKey;
-                    size_t offset = 0;
-                    char const *input = buf.get();
-                    if (header.length == 126) {
-                        payloadLength = be16toh(*(uint16_t const *)(input + offset));
-                        offset += sizeof(uint16_t);
-                    } else if (header.length == 127) {
-                        be64toh(*(uint64_t const *)(input + offset));
-                        offset += sizeof(uint64_t);
-                    }
-                    maskingKey = be32toh(*(uint32_t const *)(input + offset));
-                    return _read_buf.read_exactly(payloadLength).then(
-                            [this, payloadLength, maskingKey](temporary_buffer<char> data) {
-                        std::string payload{data.get()};
-                        for (uint64_t i = 0, j = 0; i < payloadLength; ++i, j = (j + 1) % 4) {
-                            payload[i] ^= static_cast<char>(((maskingKey << (j * 8)) >> 24));
-                        }
-                        wlogger.info("Payload: {}", payload);
-                    });
-                });
+            // RSVX must be 0
+            if (header.rsv1 | header.rsv2 | header.rsv3) {
+                throw websocket::exception("Frame not masked.");
             }
-            //FIXME: implement
+            // Opcode must be known.
+            if (!header.isOpcodeKnown()) {
+                throw websocket::exception("Unknown opcode.");
+            } 
+            header.debug();
+            return seastar::make_ready_future<FrameHeader>(header);
         }
-        return seastar::make_ready_future<>();
+    }).then([this](FrameHeader header) { 
+        return _read_buf.read_exactly(header.getRestOfHeaderLength()).then(
+                [this, header = std::move(header)](temporary_buffer<char> buf) mutable {
+            if (buf.size() < header.getRestOfHeaderLength()) {
+                this->_done = true;
+                throw websocket::exception("Connection closed.");
+            } else {
+                uint64_t payloadLength = header.length;
+                uint32_t maskingKey;
+                size_t offset = 0;
+                char const *input = buf.get();
+                if (header.length == 126) {
+                    payloadLength = be16toh(*(uint16_t const *)(input + offset));
+                    offset += sizeof(uint16_t);
+                } else if (header.length == 127) {
+                    payloadLength = be64toh(*(uint64_t const *)(input + offset));
+                    offset += sizeof(uint64_t);
+                }
+                maskingKey = be32toh(*(uint32_t const *)(input + offset));
+                temporary_buffer<char> data = _read_buf.read_exactly(payloadLength).get();
+                if (data.size() < payloadLength) {
+                    this->_done = true;
+                    throw websocket::exception("Connection closed.");
+                } else {
+                    temporary_buffer<char> _payload = data.clone();
+                    char *payload = _payload.get_write();
+                    for (uint64_t i = 0, j = 0; i < payloadLength; ++i, j = (j + 1) % 4) {
+                        payload[i] ^= static_cast<char>(((maskingKey << (j * 8)) >> 24));
+                    }
+                    return write_to_pipe(std::move(_payload));
+                }
+            }        
+            return seastar::make_ready_future<>();
+        });
     });
 }
 
@@ -239,7 +286,7 @@ future<> connection::read_loop() {
         });
     }).then_wrapped([this] (future<> f) {
         if (f.failed()) {
-            wlogger.error("Read failed: {}", f.get_exception());
+            wlogger.error("Failure: {}", f.get_exception());
         }
         return _replies.push_eventually({});
     }).finally([this] {
@@ -248,14 +295,22 @@ future<> connection::read_loop() {
 }
 
 future<> connection::response_loop() {
-    // FIXME: implement
-    return make_ready_future<>();
+    return do_until([this] {return _done;}, [this] {
+        return input().read().then([this](temporary_buffer<char> buf) {
+            // FIXME: implement
+            wlogger.info("Loop: {} {}", buf.get(), buf.size());
+            return _write_buf.write(std::move(buf));
+        });
+    });
 }
 
 void connection::shutdown() {
     wlogger.debug("Shutting down");
     _fd.shutdown_input();
     _fd.shutdown_output();
+}
+future<> connection::write_to_pipe(temporary_buffer<char>&& buf) {
+    return _writer->write(std::move(buf));
 }
 
 }

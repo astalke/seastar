@@ -28,6 +28,7 @@
 #include <seastar/core/gate.hh>
 #include <seastar/core/queue.hh>
 #include <seastar/core/when_all.hh>
+#include <seastar/core/pipe.hh>
 
 namespace seastar::experimental::websocket {
 
@@ -48,10 +49,41 @@ public:
     }
 };
 
+class connection_source_impl;
+
 /*!
  * \brief a WebSocket connection
  */
 class connection : public boost::intrusive::list_base_hook<> {
+    using buff_t = temporary_buffer<char>;
+    using writer_ptr = std::unique_ptr<pipe_writer<buff_t>>;
+    using reader_ptr = std::unique_ptr<pipe_reader<buff_t>>;
+
+    /*!
+     * \brief Implementation of connection's data source.
+     */
+    class connection_source_impl final : public data_source_impl {
+        reader_ptr pip;
+    public:
+        connection_source_impl(reader_ptr && pip) 
+            : pip(std::move(pip)) {}
+
+        virtual future<buff_t> get() override {
+            return pip->read().then([this](std::optional<buff_t> o) {
+                if (o) {
+                    return make_ready_future<buff_t>(std::move(*o));
+                }
+                return make_ready_future<buff_t>(0);
+            });
+        }
+
+        virtual future<> close() override {
+            //TODO
+            return make_ready_future<>();
+        }
+    };
+
+    static const size_t PIPE_SIZE = 1024;
     server& _server;
     connected_socket _fd;
     input_stream<char> _read_buf;
@@ -60,6 +92,9 @@ class connection : public boost::intrusive::list_base_hook<> {
     std::unique_ptr<reply> _resp;
     queue<std::unique_ptr<reply>> _replies{10};
     bool _done = false;
+
+    writer_ptr _writer;
+    input_stream<char> _input;
 public:
     /*!
      * \param server owning \ref server
@@ -71,9 +106,15 @@ public:
         , _read_buf(_fd.input())
         , _write_buf(_fd.output())
     {
+        pipe<buff_t> pip{PIPE_SIZE};
+        _writer = std::make_unique<pipe_writer<buff_t>>(std::move(pip.writer));
+        _input = input_stream<char>{
+            data_source{std::make_unique<connection_source_impl>(
+            std::make_unique<pipe_reader<buff_t>>(std::move(pip.reader)))}};
         on_new_connection();
     }
     ~connection();
+    input_stream<char>& input() {return _input;}
 
     /*!
      * \brief serve WebSocket protocol on a connection
@@ -90,6 +131,7 @@ protected:
     future<> read_http_upgrade_request();
     future<> response_loop();
     void on_new_connection();
+    future<> write_to_pipe(temporary_buffer<char>&& buf);
 };
 
 /*!
