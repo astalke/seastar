@@ -225,6 +225,10 @@ public:
      * \brief close the socket
      */
     void shutdown();
+    /*!
+     * \brief Packs buff in websocket data frame and sends it to client.
+     */
+    future<> send_data(temporary_buffer<char> buff);
 
 protected:
     future<> read_loop();
