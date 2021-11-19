@@ -52,7 +52,105 @@ public:
     }
 };
 
+struct FrameHeader {
+    static constexpr uint8_t FIN = 7;
+    static constexpr uint8_t RSV1 = 6; 
+    static constexpr uint8_t RSV2 = 5; 
+    static constexpr uint8_t RSV3 = 4;
+    static constexpr uint8_t MASKED = 7;
+
+    uint8_t fin : 1;
+    uint8_t rsv1 : 1;
+    uint8_t rsv2 : 1;
+    uint8_t rsv3 : 1;
+    uint8_t opcode : 4;
+    uint8_t masked : 1;
+    uint8_t length : 7;
+    FrameHeader(char const *input) {
+        this->fin = (input[0] >> FIN) & 1;
+        this->rsv1 = (input[0] >> RSV1) & 1;
+        this->rsv2 = (input[0] >> RSV2) & 1;
+        this->rsv3 = (input[0] >> RSV3) & 1;
+        this->opcode = input[0] & 0b1111;
+        this->masked = (input[1] >> MASKED) & 1;
+        this->length = (input[1] & 0b1111111);
+    }
+    // Returns length of the rest of the header.
+    uint64_t getRestOfHeaderLength() {
+        size_t nextReadLength = sizeof(uint32_t); // Masking key
+        if (length == 126) {
+            nextReadLength += sizeof(uint16_t);
+        } else if (length == 127) {
+            nextReadLength += sizeof(uint64_t);
+        }
+        return nextReadLength;
+    }
+    uint8_t get_fin() {return fin;}
+    uint8_t get_rsv1() {return rsv1;}
+    uint8_t get_rsv2() {return rsv2;}
+    uint8_t get_rsv3() {return rsv3;}
+    uint8_t get_opcode() {return opcode;}
+    uint8_t get_masked() {return masked;}
+    uint8_t get_length() {return length;}
+
+    bool isOpcodeKnown() {
+        //https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
+        return opcode < 0xA && !(opcode < 0x8 && opcode > 0x2);
+    }
+};
+
+
+
 class connection_source_impl;
+
+class websocket_parser {
+    enum class parsing_state : uint8_t {
+        flags_and_payload_data,
+        payload_length_and_mask,
+        payload
+    };
+    enum class connection_state : uint8_t {
+        valid,
+        closed,
+        error
+    };
+    using consumption_result_type = consumption_result<char>;
+    using buff_t = temporary_buffer<char>;
+    // What parser is currently doing.
+    parsing_state _state;
+    // State of connection - can be valid, closed or should be closed 
+    // due to error.
+    connection_state _cstate;
+    sstring _buffer;
+    std::unique_ptr<FrameHeader> _header;
+    uint64_t _payload_length;
+    uint32_t _masking_key;
+    buff_t _result;
+
+    static future<consumption_result_type> dont_stop() {
+        return make_ready_future<consumption_result_type>(continue_consuming{});
+    }
+    static future<consumption_result_type> stop(buff_t data) {
+        return make_ready_future<consumption_result_type>(stop_consuming(std::move(data)));
+    }
+
+    // Removes mask from payload given in p.
+    void remove_mask(buff_t & p, size_t n) {
+        char *payload = p.get_write();
+        for (uint64_t i = 0, j = 0; i < n; ++i, j = (j + 1) % 4) {
+            payload[i] ^= static_cast<char>(((_masking_key << (j * 8)) >> 24));
+        }
+    } 
+public:
+    websocket_parser() : _state(parsing_state::flags_and_payload_data),
+                         _cstate(connection_state::valid),
+                         _payload_length(0), 
+                         _masking_key(0) {}
+    future<consumption_result_type> operator()(temporary_buffer<char> data);
+    bool is_valid() { return _cstate == connection_state::valid; }
+    bool eof() { return _cstate == connection_state::closed; }
+    buff_t result() { return std::move(_result); }
+};
 
 /*!
  * \brief a WebSocket connection
@@ -68,8 +166,7 @@ class connection : public boost::intrusive::list_base_hook<> {
     class connection_source_impl final : public data_source_impl {
         reader_ptr pip;
     public:
-        connection_source_impl(reader_ptr && pip) 
-            : pip(std::move(pip)) {}
+        connection_source_impl(reader_ptr && pip) : pip(std::move(pip)) {}
 
         virtual future<buff_t> get() override {
             return pip->read().then([this](std::optional<buff_t> o) {
@@ -81,7 +178,7 @@ class connection : public boost::intrusive::list_base_hook<> {
         }
 
         virtual future<> close() override {
-            //TODO
+            delete pip.release();
             return make_ready_future<>();
         }
     };
@@ -98,6 +195,7 @@ class connection : public boost::intrusive::list_base_hook<> {
 
     writer_ptr _writer;
     input_stream<char> _input;
+    websocket_parser _websocket_parser;
 public:
     /*!
      * \param server owning \ref server

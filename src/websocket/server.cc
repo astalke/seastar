@@ -160,122 +160,96 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
-struct FrameHeader {
-    static constexpr uint8_t FIN = 7;
-    static constexpr uint8_t RSV1 = 6; 
-    static constexpr uint8_t RSV2 = 5; 
-    static constexpr uint8_t RSV3 = 4;
-    static constexpr uint8_t MASKED = 7;
-
-    uint8_t fin : 1;
-    uint8_t rsv1 : 1;
-    uint8_t rsv2 : 1;
-    uint8_t rsv3 : 1;
-    uint8_t opcode : 4;
-    uint8_t masked : 1;
-    uint8_t length : 7;
-    FrameHeader(char const *input) {
-        this->fin = (input[0] >> FIN) & 1;
-        this->rsv1 = (input[0] >> RSV1) & 1;
-        this->rsv2 = (input[0] >> RSV2) & 1;
-        this->rsv3 = (input[0] >> RSV3) & 1;
-        this->opcode = input[0] & 0b1111;
-        this->masked = (input[1] >> MASKED) & 1;
-        this->length = (input[1] & 0b1111111);
+future<websocket_parser::consumption_result_type> websocket_parser::operator()(
+        temporary_buffer<char> data) {
+    if (data.size() == 0) {
+        // EOF
+        _cstate = connection_state::closed;
+        return websocket_parser::stop(std::move(data));
     }
-    // Returns length of the rest of the header.
-    uint64_t getRestOfHeaderLength() {
-        size_t nextReadLength = sizeof(uint32_t); // Masking key
-        if (length == 126) {
-            nextReadLength += sizeof(uint16_t);
-        } else if (length == 127) {
-            nextReadLength += sizeof(uint64_t);
-        }
-        return nextReadLength;
-    }
-    void debug() {
-        wlogger.info("Header: {} {} {} {} {} {} {}", get_fin(), get_rsv1(), 
-                get_rsv2(), get_rsv3(), get_opcode(), 
-                get_masked(), get_length());
-    }
-    uint8_t get_fin() {return fin;}
-    uint8_t get_rsv1() {return rsv1;}
-    uint8_t get_rsv2() {return rsv2;}
-    uint8_t get_rsv3() {return rsv3;}
-    uint8_t get_opcode() {return opcode;}
-    uint8_t get_masked() {return masked;}
-    uint8_t get_length() {return length;}
+    if (_state == parsing_state::flags_and_payload_data) {
+        if (_buffer.length() + data.size() >= 2) {
+            if (_buffer.length() < 2) {
+                size_t hlen = _buffer.length();
+                _buffer.append(data.get(), 2 - hlen);
+                data.trim_front(2 - hlen);
+                _header = std::make_unique<FrameHeader>(_buffer.data());
+                _buffer = {};
 
-    bool isOpcodeKnown() {
-        //https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
-        return opcode < 0xA && !(opcode < 0x8 && opcode > 0x2);
-    }
-};
-
-class FrameContent {
-    FrameHeader header;
-    temporary_buffer<char> payload;
-public:
-    FrameContent(FrameHeader header, temporary_buffer<char> payload) : header(header), payload(std::move(payload)) {}
-};
-
-future<> connection::read_one() {
-    return _read_buf.read_exactly(2).then([this] (temporary_buffer<char> headBuf) {
-        if (headBuf.size() < 2) { //FIXME: Magic numbers
-            this->_done = true;
-            throw websocket::exception("Connection closed.");
+                // https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
+                // We must close the connection if data isn't masked.
+                if ((!_header->masked) || 
+                        // RSVX must be 0 
+                        (_header->rsv1 | _header->rsv2 | _header->rsv3) ||
+                        // Opcode must be known.
+                        (!_header->isOpcodeKnown())) {
+                    _cstate = connection_state::error;
+                    return websocket_parser::stop(std::move(data));
+                }
+            }
+            _state = parsing_state::payload_length_and_mask;
         } else {
-            FrameHeader header {headBuf.get()};
-            // https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
-            // We must close the connection if data isn't masked.
-            if (!header.masked) {
-                throw websocket::exception("RSVX is not 0.");
-            }
-            // RSVX must be 0
-            if (header.rsv1 | header.rsv2 | header.rsv3) {
-                throw websocket::exception("Frame not masked.");
-            }
-            // Opcode must be known.
-            if (!header.isOpcodeKnown()) {
-                throw websocket::exception("Unknown opcode.");
-            } 
-            header.debug();
-            return seastar::make_ready_future<FrameHeader>(header);
+            _buffer.append(data.get(), data.size());
+            return websocket_parser::dont_stop();
         }
-    }).then([this](FrameHeader header) { 
-        return _read_buf.read_exactly(header.getRestOfHeaderLength()).then(
-                [this, header = std::move(header)](temporary_buffer<char> buf) mutable {
-            if (buf.size() < header.getRestOfHeaderLength()) {
-                this->_done = true;
-                throw websocket::exception("Connection closed.");
-            } else {
-                uint64_t payloadLength = header.length;
-                uint32_t maskingKey;
+    }
+    if (_state == parsing_state::payload_length_and_mask) {
+        size_t const required_bytes = _header->getRestOfHeaderLength();
+        if (_buffer.length() + data.size() >= required_bytes) {
+            if (_buffer.length() < required_bytes) {
+                size_t hlen = _buffer.length();
+                _buffer.append(data.get(), required_bytes - hlen);
+                data.trim_front(required_bytes - hlen);
+
+                _payload_length = _header->length;
                 size_t offset = 0;
-                char const *input = buf.get();
-                if (header.length == 126) {
-                    payloadLength = be16toh(*(uint16_t const *)(input + offset));
+                char const *input = _buffer.data();
+                if (_header->length == 126) {
+                    _payload_length = be16toh(*(uint16_t const *)(input + offset));
                     offset += sizeof(uint16_t);
-                } else if (header.length == 127) {
-                    payloadLength = be64toh(*(uint64_t const *)(input + offset));
+                } else if (_header->length == 127) {
+                    _payload_length = be64toh(*(uint64_t const *)(input + offset));
                     offset += sizeof(uint64_t);
                 }
-                maskingKey = be32toh(*(uint32_t const *)(input + offset));
-                temporary_buffer<char> data = _read_buf.read_exactly(payloadLength).get();
-                if (data.size() < payloadLength) {
-                    this->_done = true;
-                    throw websocket::exception("Connection closed.");
-                } else {
-                    temporary_buffer<char> _payload = data.clone();
-                    char *payload = _payload.get_write();
-                    for (uint64_t i = 0, j = 0; i < payloadLength; ++i, j = (j + 1) % 4) {
-                        payload[i] ^= static_cast<char>(((maskingKey << (j * 8)) >> 24));
-                    }
-                    return write_to_pipe(std::move(_payload));
-                }
-            }        
-            return seastar::make_ready_future<>();
-        });
+                _masking_key = be32toh(*(uint32_t const *)(input + offset));
+                _buffer = {};
+            }                
+            _state = parsing_state::payload;
+        } else {
+            _buffer.append(data.get(), data.size());
+            return websocket_parser::dont_stop();
+        }
+    }
+    if (_state == parsing_state::payload) {
+        if (_payload_length > data.size()) {
+            _payload_length -= data.size();
+            remove_mask(data, data.size());
+            _result = std::move(data);
+            return websocket_parser::stop(buff_t(0));
+        } else { 
+            _result = data.clone();
+            remove_mask(_result, _payload_length);
+            data.trim_front(_payload_length);
+            _payload_length = 0;
+            _state = parsing_state::flags_and_payload_data;
+            return websocket_parser::stop(std::move(data));
+        }
+    }
+    _cstate = connection_state::error;
+    return websocket_parser::stop(std::move(data));
+}
+
+future<> connection::read_one() {
+    return _read_buf.consume(_websocket_parser).then([this] () mutable {
+        if (_websocket_parser.is_valid()) {
+            return write_to_pipe(_websocket_parser.result());
+        } else if (_websocket_parser.eof()) {
+            _done = true;
+            return make_ready_future<>();    
+        }
+        // ERROR
+        _done = true;
+        return make_ready_future<>();    
     });
 }
 
@@ -308,6 +282,7 @@ void connection::shutdown() {
     wlogger.debug("Shutting down");
     _fd.shutdown_input();
     _fd.shutdown_output();
+    _input.close().get();
 }
 
 future<> connection::write_to_pipe(temporary_buffer<char>&& buf) {
