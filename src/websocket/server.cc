@@ -268,12 +268,37 @@ future<> connection::read_loop() {
     });
 }
 
+future<> connection::send_data(temporary_buffer<char> buff) {
+    sstring data;
+    data.append("\x81", 1);
+    if ((126 <= buff.size()) && (buff.size() <= std::numeric_limits<uint16_t>::max())) {
+        uint16_t length = buff.size();
+        length = htobe16(length);
+        data.append("\x7e", 1);
+        data.append(reinterpret_cast<char*>(&length), sizeof(uint16_t));
+    } else if (std::numeric_limits<uint16_t>::max() < buff.size()) {
+        uint64_t length = buff.size();
+        length = htobe64(length);
+        data.append("\x7f", 1);
+        data.append(reinterpret_cast<char*>(&length), sizeof(uint64_t));
+    } else {
+        uint8_t length = buff.size() & 0x7F;
+        data.append(reinterpret_cast<char*>(&length), sizeof(uint8_t));
+    }
+    data.append(buff.get(), buff.size()); 
+    temporary_buffer<char> result{data.data(), data.length()}; 
+    return _write_buf.write(std::move(result)).then([this]{
+        return _write_buf.flush();
+    }); 
+}
+
 future<> connection::response_loop() {
     return do_until([this] {return _done;}, [this] {
         return input().read().then([this](temporary_buffer<char> buf) {
             // FIXME: implement
             wlogger.info("Loop: {} {}", buf.get(), buf.size());
-            return this->_server.handlers["echo"](std::move(buf), _write_buf);
+            return send_data(std::move(buf));
+            //return this->_server.handlers["echo"](std::move(buf), _write_buf);
         });
     });
 }
