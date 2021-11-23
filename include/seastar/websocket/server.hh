@@ -35,6 +35,8 @@
 
 namespace seastar::experimental::websocket {
 
+using hanlder_t = std::function<future<temporary_buffer<char>>(temporary_buffer<char>)>; 
+
 class server;
 struct reply {
     //TODO: implement
@@ -249,7 +251,7 @@ class server {
     std::vector<server_socket> _listeners;
     gate _task_gate;
     boost::intrusive::list<connection> _connections;
-    std::map<std::string, std::function<future<>(temporary_buffer<char>&&, output_stream<char>&)>> handlers;
+    std::map<std::string, hanlder_t> _handlers;
 public:
     /*!
      * \brief listen for a WebSocket connection on given address
@@ -270,7 +272,7 @@ public:
 
     bool is_handler_registered(std::string &name);
 
-    void register_handler(std::string &&name, std::function<future<>(temporary_buffer<char>&&, output_stream<char>&)> _handler);
+    void register_handler(std::string &&name, hanlder_t handler);
 
     friend class connection;
 protected:
