@@ -62,5 +62,22 @@ SEASTAR_TEST_CASE(test_websocket_handshake) {
         for (auto& header : resp->_headers) {
             std::cout << header.first << ':' << header.second << std::endl;
         }
+
+        dummy.register_handler("echo", [] (temporary_buffer<char> buf) {
+            // Is this UB?
+            return async([&] { return std::move(buf); });
+        });
+
+        const std::string frame =
+            "\x01\x8C\x00\x00"
+            "\x00\x00\x48\x65"
+            "\x6c\x6c\x6f\x20"
+            "\x77\x6f\x72\x6c"
+            "\x64\x21";
+        const std::string response = frame;
+        
+        // TODO: actually write the test.
+        output.write(frame).get();
+        output.flush().get();
     });
 }
