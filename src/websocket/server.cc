@@ -160,7 +160,7 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
-future<websocket_parser::consumption_result_type> websocket_parser::operator()(
+future<websocket_parser::consumption_result_t> websocket_parser::operator()(
         temporary_buffer<char> data) {
     if (data.size() == 0) {
         // EOF
@@ -248,6 +248,7 @@ future<> connection::read_one() {
             return make_ready_future<>();    
         }
         // ERROR
+        wlogger.error("Reading from socket has failed.");
         _done = true;
         return make_ready_future<>();    
     });
@@ -297,8 +298,7 @@ future<> connection::response_loop() {
         return input().read().then([this](temporary_buffer<char> buf) {
             // FIXME: implement
             wlogger.info("Loop: {} {}", buf.get(), buf.size());
-            return send_data(std::move(buf));
-            //return this->_server.handlers["echo"](std::move(buf), _write_buf);
+            return send_data(this->_server._handlers["echo"](std::move(buf)).get());
         });
     });
 }
@@ -315,11 +315,11 @@ future<> connection::write_to_pipe(temporary_buffer<char>&& buf) {
 }
 
 bool server::is_handler_registered(std::string &name) {
-    return handlers.find(name) != handlers.end();
+    return _handlers.find(name) != _handlers.end();
 }
 
-void server::register_handler(std::string &&name, std::function<future<>(temporary_buffer<char>&&, output_stream<char>&)> _handler) {
-    handlers[name] = _handler;
+void server::register_handler(std::string&& name, handler_t handler) {
+    _handlers[name] = handler;
 }
 
 
