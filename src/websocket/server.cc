@@ -160,7 +160,7 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
-future<websocket_parser::consumption_result_type> websocket_parser::operator()(
+future<websocket_parser::consumption_result_t> websocket_parser::operator()(
         temporary_buffer<char> data) {
     if (data.size() == 0) {
         // EOF
@@ -173,7 +173,7 @@ future<websocket_parser::consumption_result_type> websocket_parser::operator()(
                 size_t hlen = _buffer.length();
                 _buffer.append(data.get(), 2 - hlen);
                 data.trim_front(2 - hlen);
-                _header = std::make_unique<FrameHeader>(_buffer.data());
+                _header = std::make_unique<frame_header>(_buffer.data());
                 _buffer = {};
 
                 // https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
@@ -182,7 +182,7 @@ future<websocket_parser::consumption_result_type> websocket_parser::operator()(
                         // RSVX must be 0 
                         (_header->rsv1 | _header->rsv2 | _header->rsv3) ||
                         // Opcode must be known.
-                        (!_header->isOpcodeKnown())) {
+                        (!_header->is_opcode_known())) {
                     _cstate = connection_state::error;
                     return websocket_parser::stop(std::move(data));
                 }
@@ -194,7 +194,7 @@ future<websocket_parser::consumption_result_type> websocket_parser::operator()(
         }
     }
     if (_state == parsing_state::payload_length_and_mask) {
-        size_t const required_bytes = _header->getRestOfHeaderLength();
+        size_t const required_bytes = _header->get_rest_of_header_length();
         if (_buffer.length() + data.size() >= required_bytes) {
             if (_buffer.length() < required_bytes) {
                 size_t hlen = _buffer.length();
@@ -248,6 +248,7 @@ future<> connection::read_one() {
             return make_ready_future<>();    
         }
         // ERROR
+        wlogger.error("Reading from socket has failed.");
         _done = true;
         return make_ready_future<>();    
     });
@@ -317,7 +318,7 @@ bool server::is_handler_registered(std::string &name) {
     return _handlers.find(name) != _handlers.end();
 }
 
-void server::register_handler(std::string &&name, hanlder_t handler) {
+void server::register_handler(std::string&& name, handler_t handler) {
     _handlers[name] = handler;
 }
 
