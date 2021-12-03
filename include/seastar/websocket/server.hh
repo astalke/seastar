@@ -35,7 +35,7 @@
 
 namespace seastar::experimental::websocket {
 
-using hanlder_t = std::function<future<temporary_buffer<char>>(temporary_buffer<char>)>; 
+using handler_t = std::function<future<temporary_buffer<char>>(temporary_buffer<char>)>; 
 
 class server;
 struct reply {
@@ -54,7 +54,7 @@ public:
     }
 };
 
-struct FrameHeader {
+struct frame_header {
     static constexpr uint8_t FIN = 7;
     static constexpr uint8_t RSV1 = 6; 
     static constexpr uint8_t RSV2 = 5; 
@@ -68,7 +68,7 @@ struct FrameHeader {
     uint8_t opcode : 4;
     uint8_t masked : 1;
     uint8_t length : 7;
-    FrameHeader(char const *input) {
+    frame_header(char const *input) {
         this->fin = (input[0] >> FIN) & 1;
         this->rsv1 = (input[0] >> RSV1) & 1;
         this->rsv2 = (input[0] >> RSV2) & 1;
@@ -78,14 +78,14 @@ struct FrameHeader {
         this->length = (input[1] & 0b1111111);
     }
     // Returns length of the rest of the header.
-    uint64_t getRestOfHeaderLength() {
-        size_t nextReadLength = sizeof(uint32_t); // Masking key
+    uint64_t get_rest_of_header_length() {
+        size_t next_read_length = sizeof(uint32_t); // Masking key
         if (length == 126) {
-            nextReadLength += sizeof(uint16_t);
+            next_read_length += sizeof(uint16_t);
         } else if (length == 127) {
-            nextReadLength += sizeof(uint64_t);
+            next_read_length += sizeof(uint64_t);
         }
-        return nextReadLength;
+        return next_read_length;
     }
     uint8_t get_fin() {return fin;}
     uint8_t get_rsv1() {return rsv1;}
@@ -95,7 +95,7 @@ struct FrameHeader {
     uint8_t get_masked() {return masked;}
     uint8_t get_length() {return length;}
 
-    bool isOpcodeKnown() {
+    bool is_opcode_known() {
         //https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
         return opcode < 0xA && !(opcode < 0x8 && opcode > 0x2);
     }
@@ -116,7 +116,7 @@ class websocket_parser {
         closed,
         error
     };
-    using consumption_result_type = consumption_result<char>;
+    using consumption_result_t = consumption_result<char>;
     using buff_t = temporary_buffer<char>;
     // What parser is currently doing.
     parsing_state _state;
@@ -124,20 +124,20 @@ class websocket_parser {
     // due to error.
     connection_state _cstate;
     sstring _buffer;
-    std::unique_ptr<FrameHeader> _header;
+    std::unique_ptr<frame_header> _header;
     uint64_t _payload_length;
     uint32_t _masking_key;
     buff_t _result;
 
-    static future<consumption_result_type> dont_stop() {
-        return make_ready_future<consumption_result_type>(continue_consuming{});
+    static future<consumption_result_t> dont_stop() {
+        return make_ready_future<consumption_result_t>(continue_consuming{});
     }
-    static future<consumption_result_type> stop(buff_t data) {
-        return make_ready_future<consumption_result_type>(stop_consuming(std::move(data)));
+    static future<consumption_result_t> stop(buff_t data) {
+        return make_ready_future<consumption_result_t>(stop_consuming(std::move(data)));
     }
 
     // Removes mask from payload given in p.
-    void remove_mask(buff_t & p, size_t n) {
+    void remove_mask(buff_t& p, size_t n) {
         char *payload = p.get_write();
         for (uint64_t i = 0, j = 0; i < n; ++i, j = (j + 1) % 4) {
             payload[i] ^= static_cast<char>(((_masking_key << (j * 8)) >> 24));
@@ -148,7 +148,7 @@ public:
                          _cstate(connection_state::valid),
                          _payload_length(0), 
                          _masking_key(0) {}
-    future<consumption_result_type> operator()(temporary_buffer<char> data);
+    future<consumption_result_t> operator()(temporary_buffer<char> data);
     bool is_valid() { return _cstate == connection_state::valid; }
     bool eof() { return _cstate == connection_state::closed; }
     buff_t result() { return std::move(_result); }
@@ -251,7 +251,7 @@ class server {
     std::vector<server_socket> _listeners;
     gate _task_gate;
     boost::intrusive::list<connection> _connections;
-    std::map<std::string, hanlder_t> _handlers;
+    std::map<std::string, handler_t> _handlers;
 public:
     /*!
      * \brief listen for a WebSocket connection on given address
@@ -272,7 +272,7 @@ public:
 
     bool is_handler_registered(std::string &name);
 
-    void register_handler(std::string &&name, hanlder_t handler);
+    void register_handler(std::string&& name, handler_t handler);
 
     friend class connection;
 protected:
