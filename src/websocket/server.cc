@@ -160,7 +160,7 @@ future<> connection::read_http_upgrade_request() {
     });
 }
 
-future<websocket_parser::consumption_result_type> websocket_parser::operator()(
+future<websocket_parser::consumption_result_t> websocket_parser::operator()(
         temporary_buffer<char> data) {
     if (data.size() == 0) {
         // EOF
@@ -248,6 +248,7 @@ future<> connection::read_one() {
             return make_ready_future<>();    
         }
         // ERROR
+        wlogger.error("Reading from socket has failed.");
         _done = true;
         return make_ready_future<>();    
     });
@@ -317,7 +318,7 @@ bool server::is_handler_registered(std::string &name) {
     return _handlers.find(name) != _handlers.end();
 }
 
-void server::register_handler(std::string &&name, hanlder_t handler) {
+void server::register_handler(std::string&& name, handler_t handler) {
     _handlers[name] = handler;
 }
 
