@@ -20,6 +20,7 @@ SEASTAR_TEST_CASE(test_websocket_handshake) {
                 "Connection: Upgrade\r\n"
                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
                 "Sec-WebSocket-Version: 13\r\n"
+                "WebSocket-Subprotocol: echo\r\n"
                 "\r\n";
         loopback_connection_factory factory;
         loopback_socket_impl lsi(factory);
@@ -64,8 +65,7 @@ SEASTAR_TEST_CASE(test_websocket_handshake) {
         }
 
         dummy.register_handler("echo", [] (temporary_buffer<char> buf) {
-            // Is this UB?
-            return async([&] { return std::move(buf); });
+            return buf;
         });
 
         const std::string frame =
