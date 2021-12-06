@@ -140,6 +140,14 @@ future<> connection::read_http_upgrade_request() {
         if (upgrade_header != "websocket") {
             throw websocket::exception("Upgrade header missing");
         }
+
+        sstring subprotocol = req->get_header("Sec-WebSocket-Protocol");
+        if (subprotocol.empty()) {
+            throw websocket::exception("Subprotocol header missing");
+        }
+        this->_subprotocol = subprotocol;
+        wlogger.debug("Sec-WebSocket-Protocol: {}", subprotocol);
+
         sstring sec_key = req->get_header("Sec-Websocket-Key");
         sstring sec_version = req->get_header("Sec-Websocket-Version");
 
@@ -298,7 +306,7 @@ future<> connection::response_loop() {
         return input().read().then([this](temporary_buffer<char> buf) {
             // FIXME: implement
             wlogger.info("Loop: {} {}", buf.get(), buf.size());
-            return send_data(this->_server._handlers["echo"](std::move(buf)).get());
+            return send_data(this->_server._handlers[this->_subprotocol](std::move(buf)));
         });
     });
 }
