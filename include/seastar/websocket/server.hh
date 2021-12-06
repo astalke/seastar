@@ -35,7 +35,7 @@
 
 namespace seastar::experimental::websocket {
 
-using handler_t = std::function<future<temporary_buffer<char>>(temporary_buffer<char>)>; 
+using handler_t = std::function<temporary_buffer<char>(temporary_buffer<char>)>;
 
 class server;
 struct reply {
@@ -198,6 +198,7 @@ class connection : public boost::intrusive::list_base_hook<> {
     writer_ptr _writer;
     input_stream<char> _input;
     websocket_parser _websocket_parser;
+    sstring _subprotocol;
 public:
     /*!
      * \param server owning \ref server
