@@ -38,9 +38,7 @@ int main(int argc, char** argv) {
         return async([] {
             websocket::server ws;
             ws.register_handler("echo", [] (temporary_buffer<char> buf) {
-                // TODO: verify 
-                // Is this UB?
-                return async([&] { return std::move(buf); });
+                return buf;
             });
             auto d = defer([&ws] () noexcept {
                 ws.stop().get();
