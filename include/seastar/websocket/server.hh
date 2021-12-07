@@ -35,7 +35,7 @@
 
 namespace seastar::experimental::websocket {
 
-using hanlder_t = std::function<temporary_buffer<char>(temporary_buffer<char>)>;
+using handler_t = std::function<temporary_buffer<char>(temporary_buffer<char>)>;
 
 class server;
 struct reply {
