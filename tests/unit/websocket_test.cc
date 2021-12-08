@@ -64,8 +64,9 @@ SEASTAR_TEST_CASE(test_websocket_handshake) {
             std::cout << header.first << ':' << header.second << std::endl;
         }
 
-        dummy.register_handler("echo", [] (temporary_buffer<char> buf) {
-            return buf;
+        dummy.register_handler("echo", [] (input_stream<char>& in,
+                output_stream<char>& out) {
+            return make_ready_future<>();
         });
 
         const std::string frame =
