@@ -184,13 +184,9 @@ class connection : public boost::intrusive::list_base_hook<> {
     public:
         connection_sink_impl(queue<buff_t>* data) : data(data) {}
 
-        // Required for some reason.
-        virtual future<> put(net::packet data) {
-            return make_ready_future<>();
-        }
-
-        virtual future<> put(buff_t buf) override {
-            return data->push_eventually(std::move(buf));
+        virtual future<> put(net::packet d) override {
+            net::fragment f = d.frag(0);
+            return data->push_eventually(temporary_buffer<char>{std::move(f.base), f.size});
         }
 
         size_t buffer_size() const noexcept override { 

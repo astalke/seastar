@@ -39,10 +39,14 @@ int main(int argc, char** argv) {
             websocket::server ws;
             ws.register_handler("echo", [] (input_stream<char>& in,
                         output_stream<char>& out) {
-                return in.read().then([](temporary_buffer<char> f) {
-                    std::string s{f.get(), f.size()};
-                    std::cerr << s;
-                    return make_ready_future<>();
+                return do_with(false, [&in, &out] (bool done) {
+                    return do_until([&done]{return done;}, [&in, &out](){
+                        return in.read().then([&out](temporary_buffer<char> f) {
+                            return out.write(std::move(f)).then([&out](){
+                                return out.flush();
+                            });
+                        });
+                    });
                 });
             });
             auto d = defer([&ws] () noexcept {
