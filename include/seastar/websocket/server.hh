@@ -31,11 +31,10 @@
 #include <seastar/core/gate.hh>
 #include <seastar/core/queue.hh>
 #include <seastar/core/when_all.hh>
-#include <seastar/core/pipe.hh>
 
 namespace seastar::experimental::websocket {
 
-using handler_t = std::function<temporary_buffer<char>(temporary_buffer<char>)>;
+using handler_t = std::function<future<>(input_stream<char>&, output_stream<char>&)>;
 
 class server;
 struct reply {
@@ -45,11 +44,11 @@ struct reply {
 /*!
  * \brief an error in handling a WebSocket connection
  */
-class exception : std::exception {
+class exception : public std::exception {
     std::string _msg;
 public:
     exception(std::string_view msg) : _msg(msg) {}
-    const char* what() const noexcept {
+    virtual const char* what() const noexcept {
         return _msg.c_str();
     }
 };
@@ -102,8 +101,6 @@ struct frame_header {
 };
 
 
-
-class connection_source_impl;
 
 class websocket_parser {
     enum class parsing_state : uint8_t {
@@ -159,33 +156,54 @@ public:
  */
 class connection : public boost::intrusive::list_base_hook<> {
     using buff_t = temporary_buffer<char>;
-    using writer_ptr = std::unique_ptr<pipe_writer<buff_t>>;
-    using reader_ptr = std::unique_ptr<pipe_reader<buff_t>>;
 
     /*!
      * \brief Implementation of connection's data source.
      */
     class connection_source_impl final : public data_source_impl {
-        reader_ptr pip;
+        queue<buff_t>* data;
+
     public:
-        connection_source_impl(reader_ptr && pip) : pip(std::move(pip)) {}
+        connection_source_impl(queue<buff_t>* data) : data(data) {}
 
         virtual future<buff_t> get() override {
-            return pip->read().then([this](std::optional<buff_t> o) {
-                if (o) {
-                    return make_ready_future<buff_t>(std::move(*o));
-                }
-                return make_ready_future<buff_t>(0);
-            });
+            return data->pop_eventually();
         }
 
         virtual future<> close() override {
-            delete pip.release();
+            data->abort(std::make_exception_ptr(exception("Connection closed")));
             return make_ready_future<>();
         }
     };
 
-    static const size_t PIPE_SIZE = 1024;
+    /*!
+     * \brief Implementation of connection's data sink.
+     */
+    class connection_sink_impl final : public data_sink_impl {
+        queue<buff_t>* data;
+    public:
+        connection_sink_impl(queue<buff_t>* data) : data(data) {}
+
+        // Required for some reason.
+        virtual future<> put(net::packet data) {
+            return make_ready_future<>();
+        }
+
+        virtual future<> put(buff_t buf) override {
+            return data->push_eventually(std::move(buf));
+        }
+
+        size_t buffer_size() const noexcept override { 
+            return data->max_size(); 
+        }
+
+        virtual future<> close() override {
+            data->abort(std::make_exception_ptr(exception("Connection closed")));
+            return make_ready_future<>();
+        }
+    };
+
+    static const size_t PIPE_SIZE = 512;
     server& _server;
     connected_socket _fd;
     input_stream<char> _read_buf;
@@ -195,10 +213,14 @@ class connection : public boost::intrusive::list_base_hook<> {
     queue<std::unique_ptr<reply>> _replies{10};
     bool _done = false;
 
-    writer_ptr _writer;
-    input_stream<char> _input;
     websocket_parser _websocket_parser;
+    queue <temporary_buffer<char>> _input_buffer;
+    input_stream<char> _input;
+
+    queue <temporary_buffer<char>> _output_buffer;
+    output_stream<char> _output;
     sstring _subprotocol;
+    handler_t _handler;
 public:
     /*!
      * \param server owning \ref server
@@ -209,16 +231,16 @@ public:
         , _fd(std::move(fd))
         , _read_buf(_fd.input())
         , _write_buf(_fd.output())
+        , _input_buffer{PIPE_SIZE}
+        , _output_buffer{PIPE_SIZE}
     {
-        pipe<buff_t> pip{PIPE_SIZE};
-        _writer = std::make_unique<pipe_writer<buff_t>>(std::move(pip.writer));
-        _input = input_stream<char>{
-            data_source{std::make_unique<connection_source_impl>(
-            std::make_unique<pipe_reader<buff_t>>(std::move(pip.reader)))}};
+        _input = input_stream<char>{data_source{
+                std::make_unique<connection_source_impl>(&_input_buffer)}};
+        _output = output_stream<char>{data_sink{
+                std::make_unique<connection_sink_impl>(&_output_buffer)}};
         on_new_connection();
     }
     ~connection();
-    input_stream<char>& input() {return _input;}
 
     /*!
      * \brief serve WebSocket protocol on a connection
@@ -228,18 +250,18 @@ public:
      * \brief close the socket
      */
     void shutdown();
-    /*!
-     * \brief Packs buff in websocket data frame and sends it to client.
-     */
-    future<> send_data(temporary_buffer<char> buff);
-
+    
 protected:
     future<> read_loop();
     future<> read_one();
     future<> read_http_upgrade_request();
     future<> response_loop();
     void on_new_connection();
-    future<> write_to_pipe(temporary_buffer<char>&& buf);
+    /*!
+     * \brief Packs buff in websocket data frame and sends it to the client.
+     */
+    future<> send_data(temporary_buffer<char>&& buff);
+
 };
 
 /*!
@@ -271,7 +293,7 @@ public:
      */
     future<> stop();
 
-    bool is_handler_registered(std::string &name);
+    bool is_handler_registered(std::string const& name);
 
     void register_handler(std::string&& name, handler_t handler);
 

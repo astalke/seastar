@@ -104,6 +104,7 @@ future<> connection::process() {
         } catch (...) {
             wlogger.debug("Read exception encountered: {}", std::current_exception());
         }
+        
         try {
             std::get<1>(joined).get();
         } catch (...) {
@@ -143,8 +144,15 @@ future<> connection::read_http_upgrade_request() {
 
         sstring subprotocol = req->get_header("WebSocket-Subrotocol");
         if (subprotocol.empty()) {
-            throw websocket::exception("Subprotocol header missing");
+            // TODO: disabled temporarily for testing
+            //throw websocket::exception("Subprotocol header missing.");
+            subprotocol = "echo";
         }
+
+        if (!_server.is_handler_registered(subprotocol)) {
+            throw websocket::exception("Subprotocol not supported.");
+        }
+        this->_handler = this->_server._handlers[subprotocol];
         this->_subprotocol = subprotocol;
         wlogger.debug("Websocket-Subrotocol: {}", subprotocol);
 
@@ -250,7 +258,8 @@ future<websocket_parser::consumption_result_t> websocket_parser::operator()(
 future<> connection::read_one() {
     return _read_buf.consume(_websocket_parser).then([this] () mutable {
         if (_websocket_parser.is_valid()) {
-            return write_to_pipe(_websocket_parser.result());
+            // FIXME: implement error handling
+            return _input_buffer.push_eventually(std::move(_websocket_parser.result()));
         } else if (_websocket_parser.eof()) {
             _done = true;
             return make_ready_future<>();    
@@ -264,20 +273,31 @@ future<> connection::read_one() {
 
 future<> connection::read_loop() {
     return read_http_upgrade_request().then([this] {
-        return do_until([this] {return _done;}, [this] {
-            return read_one();
+        return when_all(
+            _handler(_input, _output), 
+            do_until([this] {return _done;}, [this] {return read_one();})
+        ).then([this] (std::tuple<future<>, future<>> joined) {
+            try {
+                std::get<0>(joined).get();
+            } catch (...) {
+                wlogger.debug("Handler exception encountered: {}", 
+                        std::current_exception());
+            }
+            try {
+                std::get<1>(joined).get();
+            } catch (...) {
+                wlogger.debug("Read exception encountered: {}", 
+                        std::current_exception());
+            }
+            // FIXME
+            return _replies.push_eventually({});
+        }).finally([this] {
+            return _read_buf.close();
         });
-    }).then_wrapped([this] (future<> f) {
-        if (f.failed()) {
-            wlogger.error("Failure: {}", f.get_exception());
-        }
-        return _replies.push_eventually({});
-    }).finally([this] {
-        return _read_buf.close();
     });
 }
 
-future<> connection::send_data(temporary_buffer<char> buff) {
+future<> connection::send_data(temporary_buffer<char>&& buff) {
     sstring data;
     data.append("\x81", 1);
     if ((126 <= buff.size()) && (buff.size() <= std::numeric_limits<uint16_t>::max())) {
@@ -303,10 +323,10 @@ future<> connection::send_data(temporary_buffer<char> buff) {
 
 future<> connection::response_loop() {
     return do_until([this] {return _done;}, [this] {
-        return input().read().then([this](temporary_buffer<char> buf) {
-            // FIXME: implement
-            wlogger.info("Loop: {} {}", buf.get(), buf.size());
-            return send_data(this->_server._handlers[this->_subprotocol](std::move(buf)));
+        // FIXME: implement error handling
+        return _output_buffer.pop_eventually().then([this] (
+                temporary_buffer<char> buf) {
+            return send_data(std::move(buf));
         });
     });
 }
@@ -315,14 +335,10 @@ void connection::shutdown() {
     wlogger.debug("Shutting down");
     _fd.shutdown_input();
     _fd.shutdown_output();
-    _input.close().get();
+    when_all(_input.close(), _output.close()).discard_result().get();
 }
 
-future<> connection::write_to_pipe(temporary_buffer<char>&& buf) {
-    return _writer->write(std::move(buf));
-}
-
-bool server::is_handler_registered(std::string &name) {
+bool server::is_handler_registered(std::string const& name) {
     return _handlers.find(name) != _handlers.end();
 }
 
