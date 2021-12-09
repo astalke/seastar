@@ -142,7 +142,7 @@ future<> connection::read_http_upgrade_request() {
             throw websocket::exception("Upgrade header missing");
         }
 
-        sstring subprotocol = req->get_header("WebSocket-Subrotocol");
+        sstring subprotocol = req->get_header("Sec-WebSocket-Protocol");
         if (subprotocol.empty()) {
             // TODO: disabled temporarily for testing
             //throw websocket::exception("Subprotocol header missing.");
@@ -154,7 +154,7 @@ future<> connection::read_http_upgrade_request() {
         }
         this->_handler = this->_server._handlers[subprotocol];
         this->_subprotocol = subprotocol;
-        wlogger.debug("Websocket-Subrotocol: {}", subprotocol);
+        wlogger.debug("Sec-WebSocket-Protocol: {}", subprotocol);
 
         sstring sec_key = req->get_header("Sec-Websocket-Key");
         sstring sec_version = req->get_header("Sec-Websocket-Version");
