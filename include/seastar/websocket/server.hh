@@ -53,6 +53,19 @@ public:
     }
 };
 
+/*!
+ * \brief Possible type of a websocket frame.
+ */
+enum class opcodes {
+    CONTINUATION,
+    TEXT,
+    BINARY,
+    CLOSE,
+    PING,
+    PONG,
+    INVALID
+};
+
 struct frame_header {
     static constexpr uint8_t FIN = 7;
     static constexpr uint8_t RSV1 = 6; 
@@ -100,8 +113,6 @@ struct frame_header {
     }
 };
 
-
-
 class websocket_parser {
     enum class parsing_state : uint8_t {
         flags_and_payload_data,
@@ -148,7 +159,39 @@ public:
     future<consumption_result_t> operator()(temporary_buffer<char> data);
     bool is_valid() { return _cstate == connection_state::valid; }
     bool eof() { return _cstate == connection_state::closed; }
-    buff_t result() { return std::move(_result); }
+    opcodes opcode() {
+        if (_header) {
+            /*
+             * Opcodes defined here: 
+             * https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
+             */
+            switch (_header->opcode) {
+                case 0x0:
+                    return opcodes::CONTINUATION;
+                case 0x1:
+                    return opcodes::TEXT;
+                case 0x2:
+                    return opcodes::BINARY;
+                case 0x8:
+                    return opcodes::CLOSE;
+                case 0x9:
+                    return opcodes::PING;
+                case 0xA:
+                    return opcodes::PONG;
+                default:
+                    return opcodes::INVALID;
+            }
+        } else {
+            return opcodes::INVALID;
+        }
+    }
+    buff_t result() { 
+        _payload_length = 0;
+        _masking_key = 0;
+        _state = parsing_state::flags_and_payload_data;
+        _cstate = connection_state::valid;
+        return std::move(_result); 
+    }
 };
 
 /*!
@@ -216,6 +259,11 @@ class connection : public boost::intrusive::list_base_hook<> {
             return make_ready_future<>();
         }
     };
+
+    future<> close() {
+        _done = true;
+        return when_all(_input.close(), _output.close()).discard_result();
+    }
 
     static const size_t PIPE_SIZE = 512;
     server& _server;

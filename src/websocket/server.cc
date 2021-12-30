@@ -260,15 +260,30 @@ future<> connection::read_one() {
     return _read_buf.consume(_websocket_parser).then([this] () mutable {
         if (_websocket_parser.is_valid()) {
             // FIXME: implement error handling
-            return _input_buffer.push_eventually(std::move(_websocket_parser.result()));
+            switch(_websocket_parser.opcode()) {
+                case opcodes::CONTINUATION:
+                case opcodes::TEXT:
+                case opcodes::BINARY:
+                    return _input_buffer.push_eventually(
+                            std::move(_websocket_parser.result()));
+                case opcodes::CLOSE:
+                    return close();
+                case opcodes::PING:
+                    // TODO
+                    return make_ready_future<>();
+                case opcodes::PONG:
+                    // TODO
+                    return make_ready_future<>();
+                default:
+                    // Invalid - do nothing.
+                    ;
+            }
         } else if (_websocket_parser.eof()) {
-            _done = true;
-            return when_all(_input.close(), _output.close()).discard_result();
+            return close();
         }
         // ERROR
         wlogger.error("Reading from socket has failed.");
-        _done = true;
-        return when_all(_input.close(), _output.close()).discard_result();
+        return close();
     });
 }
 
