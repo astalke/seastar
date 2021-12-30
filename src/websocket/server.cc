@@ -256,24 +256,37 @@ future<websocket_parser::consumption_result_t> websocket_parser::operator()(
     return websocket_parser::stop(std::move(data));
 }
 
+future<> connection::handle_ping() {
+    // TODO
+    return make_ready_future<>();
+}
+
+future<> connection::handle_pong() {
+    // TODO
+    return make_ready_future<>();
+}
+
+
 future<> connection::read_one() {
     return _read_buf.consume(_websocket_parser).then([this] () mutable {
         if (_websocket_parser.is_valid()) {
             // FIXME: implement error handling
             switch(_websocket_parser.opcode()) {
+                // We do not distinguish between these 3 types.
                 case opcodes::CONTINUATION:
                 case opcodes::TEXT:
                 case opcodes::BINARY:
                     return _input_buffer.push_eventually(
                             std::move(_websocket_parser.result()));
                 case opcodes::CLOSE:
+                    wlogger.debug("Received close frame.");
                     return close();
                 case opcodes::PING:
-                    // TODO
-                    return make_ready_future<>();
+                    return handle_ping();
+                    wlogger.debug("Received ping frame.");
                 case opcodes::PONG:
-                    // TODO
-                    return make_ready_future<>();
+                    wlogger.debug("Received pong frame.");
+                    return handle_pong();
                 default:
                     // Invalid - do nothing.
                     ;

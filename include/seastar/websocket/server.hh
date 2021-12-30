@@ -190,6 +190,7 @@ public:
         _masking_key = 0;
         _state = parsing_state::flags_and_payload_data;
         _cstate = connection_state::valid;
+        _header.reset(nullptr);
         return std::move(_result); 
     }
 };
@@ -261,9 +262,21 @@ class connection : public boost::intrusive::list_base_hook<> {
     };
 
     future<> close() {
+        // TODO: Send CLOSE packet before closing.
         _done = true;
         return when_all(_input.close(), _output.close()).discard_result();
     }
+
+    /*!
+     * \brief This function processess received PING frame.
+     * https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.2
+     */
+    future<> handle_ping();
+    /*!
+     * \brief This function processess received PONG frame.
+     * https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.3
+     */
+    future<> handle_pong();
 
     static const size_t PIPE_SIZE = 512;
     server& _server;
