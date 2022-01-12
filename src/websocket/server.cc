@@ -354,8 +354,7 @@ future<> connection::read_one() {
 
 future<> connection::read_loop() {
     return read_http_upgrade_request().then([this] {
-        return when_all(
-            _handler(_input, _output), 
+        return when_all(_handler(_input, _output), 
             do_until([this] {return _done;}, [this] {return read_one();})
         ).then([this] (std::tuple<future<>, future<>> joined) {
             try {
@@ -386,7 +385,6 @@ future<> connection::close(bool send_close) {
         }
     }().then([this]() {
         _done = true; 
-        wlogger.info("Closing!");
         return when_all(_input.close(), _output.close()).discard_result();
     });
 }
@@ -427,6 +425,8 @@ future<> connection::response_loop() {
                 temporary_buffer<char> buf) {
             return send_data(opcode_to_uint8(opcodes::TEXT), std::move(buf));
         });
+    }).finally([this]() {
+        return _write_buf.close();
     });
 }
 

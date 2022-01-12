@@ -196,7 +196,7 @@ class connection : public boost::intrusive::list_base_hook<> {
      * \brief Implementation of connection's data source.
      */
     class connection_source_impl final : public data_source_impl {
-        std::unique_ptr<queue<buff_t>> data;
+        queue<buff_t>* data;
 
     public:
         connection_source_impl(queue<buff_t>* data) : data(data) {}
@@ -223,7 +223,7 @@ class connection : public boost::intrusive::list_base_hook<> {
      * \brief Implementation of connection's data sink.
      */
     class connection_sink_impl final : public data_sink_impl {
-        std::unique_ptr<queue<buff_t>> data;
+        queue<buff_t>* data;
     public:
         connection_sink_impl(queue<buff_t>* data) : data(data) {}
 
