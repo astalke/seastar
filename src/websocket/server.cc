@@ -386,9 +386,8 @@ future<> connection::close(bool send_close) {
         }
     }().then([this]() {
         _done = true; 
-        return _output.flush().then( [this]() {
-            return when_all(_input.close(), _output.close()).discard_result();
-        });
+        wlogger.info("Closing!");
+        return when_all(_input.close(), _output.close()).discard_result();
     });
 }
 
