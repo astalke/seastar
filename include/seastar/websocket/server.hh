@@ -37,9 +37,6 @@ namespace seastar::experimental::websocket {
 using handler_t = std::function<future<>(input_stream<char>&, output_stream<char>&)>;
 
 class server;
-struct reply {
-    //TODO: implement
-};
 
 /*!
  * \brief an error in handling a WebSocket connection
@@ -65,6 +62,9 @@ enum class opcodes {
     PONG,
     INVALID
 };
+
+opcodes uint8_to_opcode(uint8_t opcode);
+uint8_t opcode_to_uint8(opcodes opcode);
 
 struct frame_header {
     static constexpr uint8_t FIN = 7;
@@ -160,27 +160,8 @@ public:
     bool is_valid() { return _cstate == connection_state::valid; }
     bool eof() { return _cstate == connection_state::closed; }
     opcodes opcode() {
-        if (_header) {
-            /*
-             * Opcodes defined here: 
-             * https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
-             */
-            switch (_header->opcode) {
-                case 0x0:
-                    return opcodes::CONTINUATION;
-                case 0x1:
-                    return opcodes::TEXT;
-                case 0x2:
-                    return opcodes::BINARY;
-                case 0x8:
-                    return opcodes::CLOSE;
-                case 0x9:
-                    return opcodes::PING;
-                case 0xA:
-                    return opcodes::PONG;
-                default:
-                    return opcodes::INVALID;
-            }
+        if (_header) { 
+            return uint8_to_opcode(_header->opcode);
         } else {
             return opcodes::INVALID;
         }
@@ -215,7 +196,7 @@ class connection : public boost::intrusive::list_base_hook<> {
      * \brief Implementation of connection's data source.
      */
     class connection_source_impl final : public data_source_impl {
-        queue<buff_t>* data;
+        std::unique_ptr<queue<buff_t>> data;
 
     public:
         connection_source_impl(queue<buff_t>* data) : data(data) {}
@@ -242,7 +223,7 @@ class connection : public boost::intrusive::list_base_hook<> {
      * \brief Implementation of connection's data sink.
      */
     class connection_sink_impl final : public data_sink_impl {
-        queue<buff_t>* data;
+        std::unique_ptr<queue<buff_t>> data;
     public:
         connection_sink_impl(queue<buff_t>* data) : data(data) {}
 
@@ -261,11 +242,7 @@ class connection : public boost::intrusive::list_base_hook<> {
         }
     };
 
-    future<> close() {
-        // TODO: Send CLOSE packet before closing.
-        _done = true;
-        return when_all(_input.close(), _output.close()).discard_result();
-    }
+    future<> close(bool send_close);
 
     /*!
      * \brief This function processess received PING frame.
@@ -284,16 +261,14 @@ class connection : public boost::intrusive::list_base_hook<> {
     input_stream<char> _read_buf;
     output_stream<char> _write_buf;
     http_request_parser _http_parser;
-    std::unique_ptr<reply> _resp;
-    queue<std::unique_ptr<reply>> _replies{10};
     bool _done = false;
 
     websocket_parser _websocket_parser;
     queue <temporary_buffer<char>> _input_buffer;
     input_stream<char> _input;
-
     queue <temporary_buffer<char>> _output_buffer;
     output_stream<char> _output;
+
     sstring _subprotocol;
     handler_t _handler;
 public:
@@ -333,9 +308,9 @@ protected:
     future<> response_loop();
     void on_new_connection();
     /*!
-     * \brief Packs buff in websocket data frame and sends it to the client.
+     * \brief Packs buff in websocket frame and sends it to the client.
      */
-    future<> send_data(temporary_buffer<char>&& buff);
+    future<> send_data(uint8_t opcode, temporary_buffer<char>&& buff);
 
 };
 
