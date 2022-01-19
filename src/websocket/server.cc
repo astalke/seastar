@@ -37,6 +37,55 @@ static sstring http_upgrade_reply_template =
 
 static logger wlogger("websocket");
 
+uint8_t opcode_to_uint8(opcodes opcode) {
+    /*
+     * Opcodes defined here: 
+     * https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
+     */
+    switch (opcode) {
+        case opcodes::CONTINUATION:
+            return 0x0;
+        case opcodes::TEXT:
+            return 0x1;
+        case opcodes::BINARY:
+            return 0x2;
+        case opcodes::CLOSE:
+            return 0x8;
+        case opcodes::PING:
+            return 0x9;
+        case opcodes::PONG:
+            return 0xA;
+        default:
+            break;
+    }
+    // Invalid.
+    return 255;
+}
+
+opcodes uint8_to_opcode(uint8_t opcode) {
+    /*
+     * Opcodes defined here: 
+     * https://datatracker.ietf.org/doc/html/rfc6455#section-5.2
+     */
+    switch (opcode) {
+        case 0x0:
+            return opcodes::CONTINUATION;
+        case 0x1:
+            return opcodes::TEXT;
+        case 0x2:
+            return opcodes::BINARY;
+        case 0x8:
+            return opcodes::CLOSE;
+        case 0x9:
+            return opcodes::PING;
+        case 0xA:
+            return opcodes::PONG;
+        default:
+            break;
+    }
+    return opcodes::INVALID;
+}
+
 void server::listen(socket_address addr, listen_options lo) {
     _listeners.push_back(seastar::listen(addr, lo));
     do_accepts(_listeners.size() - 1);
@@ -256,26 +305,56 @@ future<websocket_parser::consumption_result_t> websocket_parser::operator()(
     return websocket_parser::stop(std::move(data));
 }
 
+future<> connection::handle_ping() {
+    // TODO
+    return make_ready_future<>();
+}
+
+future<> connection::handle_pong() {
+    // TODO
+    return make_ready_future<>();
+}
+
+
 future<> connection::read_one() {
     return _read_buf.consume(_websocket_parser).then([this] () mutable {
         if (_websocket_parser.is_valid()) {
             // FIXME: implement error handling
-            return _input_buffer.push_eventually(std::move(_websocket_parser.result()));
+            switch(_websocket_parser.opcode()) {
+                // We do not distinguish between these 3 types.
+                case opcodes::CONTINUATION:
+                case opcodes::TEXT:
+                case opcodes::BINARY:
+                    return _input_buffer.push_eventually(
+                            std::move(_websocket_parser.result()));
+                case opcodes::CLOSE:
+                    wlogger.debug("Received close frame.");
+                    /*
+                     * datatracker.ietf.org/doc/html/rfc6455#section-5.5.1
+                     */
+                    return close(true);
+                case opcodes::PING:
+                    return handle_ping();
+                    wlogger.debug("Received ping frame.");
+                case opcodes::PONG:
+                    wlogger.debug("Received pong frame.");
+                    return handle_pong();
+                default:
+                    // Invalid - do nothing.
+                    ;
+            }
         } else if (_websocket_parser.eof()) {
-            _done = true;
-            return when_all(_input.close(), _output.close()).discard_result();
+            return close(false);
         }
         // ERROR
         wlogger.error("Reading from socket has failed.");
-        _done = true;
-        return when_all(_input.close(), _output.close()).discard_result();
+        return close(true);
     });
 }
 
 future<> connection::read_loop() {
     return read_http_upgrade_request().then([this] {
-        return when_all(
-            _handler(_input, _output), 
+        return when_all(_handler(_input, _output), 
             do_until([this] {return _done;}, [this] {return read_one();})
         ).then([this] (std::tuple<future<>, future<>> joined) {
             try {
@@ -290,17 +369,34 @@ future<> connection::read_loop() {
                 wlogger.debug("Read exception encountered: {}", 
                         std::current_exception());
             }
-            // FIXME
-            return _replies.push_eventually({});
+            return make_ready_future<>();
         }).finally([this] {
             return _read_buf.close();
         });
     });
 }
 
-future<> connection::send_data(temporary_buffer<char>&& buff) {
+future<> connection::close(bool send_close) {
+    return [this, send_close]() {
+        if (send_close) {
+            return send_data(opcode_to_uint8(opcodes::CLOSE), temporary_buffer<char>(0));
+        } else {
+            return make_ready_future<>();
+        }
+    }().then([this]() {
+        _done = true; 
+        return when_all(_input.close(), _output.close()).discard_result();
+    });
+}
+
+future<> connection::send_data(uint8_t opcode, temporary_buffer<char>&& buff) {
     sstring data;
-    data.append("\x81", 1);
+    {
+        char first_byte[] = "\x80";
+        first_byte[0] += opcode;
+        data.append(first_byte, 1);
+    }
+
     if ((126 <= buff.size()) && (buff.size() <= std::numeric_limits<uint16_t>::max())) {
         uint16_t length = buff.size();
         length = htobe16(length);
@@ -327,8 +423,10 @@ future<> connection::response_loop() {
         // FIXME: implement error handling
         return _output_buffer.pop_eventually().then([this] (
                 temporary_buffer<char> buf) {
-            return send_data(std::move(buf));
+            return send_data(opcode_to_uint8(opcodes::TEXT), std::move(buf));
         });
+    }).finally([this]() {
+        return _write_buf.close();
     });
 }
 

@@ -37,9 +37,6 @@ namespace seastar::experimental::websocket {
 using handler_t = std::function<future<>(input_stream<char>&, output_stream<char>&)>;
 
 class server;
-struct reply {
-    //TODO: implement
-};
 
 /*!
  * \brief an error in handling a WebSocket connection
@@ -52,6 +49,22 @@ public:
         return _msg.c_str();
     }
 };
+
+/*!
+ * \brief Possible type of a websocket frame.
+ */
+enum class opcodes {
+    CONTINUATION,
+    TEXT,
+    BINARY,
+    CLOSE,
+    PING,
+    PONG,
+    INVALID
+};
+
+opcodes uint8_to_opcode(uint8_t opcode);
+uint8_t opcode_to_uint8(opcodes opcode);
 
 struct frame_header {
     static constexpr uint8_t FIN = 7;
@@ -100,8 +113,6 @@ struct frame_header {
     }
 };
 
-
-
 class websocket_parser {
     enum class parsing_state : uint8_t {
         flags_and_payload_data,
@@ -148,7 +159,21 @@ public:
     future<consumption_result_t> operator()(temporary_buffer<char> data);
     bool is_valid() { return _cstate == connection_state::valid; }
     bool eof() { return _cstate == connection_state::closed; }
-    buff_t result() { return std::move(_result); }
+    opcodes opcode() {
+        if (_header) { 
+            return uint8_to_opcode(_header->opcode);
+        } else {
+            return opcodes::INVALID;
+        }
+    }
+    buff_t result() { 
+        _payload_length = 0;
+        _masking_key = 0;
+        _state = parsing_state::flags_and_payload_data;
+        _cstate = connection_state::valid;
+        _header.reset(nullptr);
+        return std::move(_result); 
+    }
 };
 
 /*!
@@ -217,22 +242,33 @@ class connection : public boost::intrusive::list_base_hook<> {
         }
     };
 
+    future<> close(bool send_close);
+
+    /*!
+     * \brief This function processess received PING frame.
+     * https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.2
+     */
+    future<> handle_ping();
+    /*!
+     * \brief This function processess received PONG frame.
+     * https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.3
+     */
+    future<> handle_pong();
+
     static const size_t PIPE_SIZE = 512;
     server& _server;
     connected_socket _fd;
     input_stream<char> _read_buf;
     output_stream<char> _write_buf;
     http_request_parser _http_parser;
-    std::unique_ptr<reply> _resp;
-    queue<std::unique_ptr<reply>> _replies{10};
     bool _done = false;
 
     websocket_parser _websocket_parser;
     queue <temporary_buffer<char>> _input_buffer;
     input_stream<char> _input;
-
     queue <temporary_buffer<char>> _output_buffer;
     output_stream<char> _output;
+
     sstring _subprotocol;
     handler_t _handler;
 public:
@@ -272,9 +308,9 @@ protected:
     future<> response_loop();
     void on_new_connection();
     /*!
-     * \brief Packs buff in websocket data frame and sends it to the client.
+     * \brief Packs buff in websocket frame and sends it to the client.
      */
-    future<> send_data(temporary_buffer<char>&& buff);
+    future<> send_data(uint8_t opcode, temporary_buffer<char>&& buff);
 
 };
 
