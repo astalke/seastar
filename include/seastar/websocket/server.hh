@@ -300,6 +300,8 @@ public:
      * \brief close the socket
      */
     void shutdown();
+
+    future<> close();
     
 protected:
     future<> read_loop();
