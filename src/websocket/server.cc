@@ -74,25 +74,36 @@ void server::listen(socket_address addr) {
 void server::do_accepts(int which) {
     // Waited on with the gate
     (void)try_with_gate(_task_gate, [this, which] {
+        std::cerr << "do_accepts" << std::endl;
         return keep_doing([this, which] {
+            std::cerr << "keep_doing" << std::endl;
             return try_with_gate(_task_gate, [this, which] {
+                std::cerr << "do_accepts_2" << std::endl;
                 return do_accept_one(which);
             });
-        }).handle_exception_type([](const gate_closed_exception& e) {});
-    }).handle_exception_type([](const gate_closed_exception& e) {});
+        }).handle_exception_type([](const gate_closed_exception& e) {
+            std::cerr << "do_acepts_except_1" << std::endl;
+        });
+    }).handle_exception_type([](const gate_closed_exception& e) {
+        std::cerr << "do_acepts_except_2" << std::endl;
+    });
 }
 
 future<> server::do_accept_one(int which) {
     return _listeners[which].accept().then([this] (accept_result ar) mutable {
+        std::cerr << "do_acept_one_cont" << std::endl;
         auto conn = std::make_unique<connection>(*this, std::move(ar.connection));
         (void)try_with_gate(_task_gate, [conn = std::move(conn)]() mutable {
+            std::cerr << "do_acept_one_cont_gate" << std::endl;
             return conn->process().finally([conn = std::move(conn)] {
+                std::cerr << "finished_cont" << std::endl;
                 wlogger.debug("Connection is finished");
             });
         }).handle_exception_type([] (const gate_closed_exception& e) {});
     }).handle_exception_type([] (const std::system_error &e) {
         // We expect a ECONNABORTED when server::stop is called,
         // no point in warning about that.
+        wlogger.error("accept failed: {}", e);
         if (e.code().value() != ECONNABORTED) {
             wlogger.error("accept failed: {}", e);
         }
@@ -102,12 +113,16 @@ future<> server::do_accept_one(int which) {
 }
 
 future<> server::stop() {
+    std::cerr << "stop" << std::endl;
     future<> tasks_done = _task_gate.close();
     for (auto&& l : _listeners) {
         l.abort_accept();
     }
+    std::cerr << "l'abort" << std::endl;
     return tasks_done.then([this] {
+        std::cerr << "tasks_done" << std::endl;
         return parallel_for_each(_connections, [] (connection& conn) {
+            std::cerr << "parallel" << std::endl;
             return conn.close().handle_exception([] (auto ignored) {});
         });
     });

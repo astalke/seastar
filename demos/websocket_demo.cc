@@ -55,7 +55,9 @@ int main(int argc, char** argv) {
                 });
             });
             auto d = defer([&ws] () noexcept {
+                std::cerr << "defer_start" << std::endl;
                 ws.stop().get();
+                std::cerr << "defer_end" << std::endl;
             });
             ws.listen(socket_address(ipv4_addr("127.0.0.1", 8123)));
             std::cout << "Listening on 127.0.0.1:8123 for 1 hour (interruptible, hit Ctrl-C to stop)..." << std::endl;
